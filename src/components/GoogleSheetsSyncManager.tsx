@@ -11,6 +11,7 @@ import {
   Save,
   Check,
   RefreshCw,
+  Download,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import {
@@ -19,7 +20,9 @@ import {
   logout,
   createPortfolioSpreadsheet,
   appendArtworkToSpreadsheet,
+  downloadArtworkAsCSV,
   SpreadsheetInfo,
+  GoogleAccountUser,
 } from '../services/googleSheets';
 import { GeneratedPortfolioData } from '../types';
 
@@ -32,10 +35,13 @@ export const GoogleSheetsSyncManager: React.FC<GoogleSheetsSyncManagerProps> = (
   currentPortfolio,
   onSaveSuccess,
 }) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<GoogleAccountUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
   const [isSigningIn, setIsSigningIn] = useState<boolean>(false);
+
+  // Detect whether app is running inside an iframe (AI Studio preview iframe)
+  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
 
   // Spreadsheet state (ID cached in localStorage so user can keep saving to the same sheet)
   const [currentSheet, setCurrentSheet] = useState<SpreadsheetInfo | null>(() => {
@@ -93,7 +99,25 @@ export const GoogleSheetsSyncManager: React.FC<GoogleSheetsSyncManagerProps> = (
       setUser(res.user);
       setToken(res.accessToken);
     } catch (err: any) {
-      setErrorMessage(err.message || '구글 로그인 중 오류가 발생했습니다.');
+      console.error('Google Sign In Error:', err);
+      const isPopupIssue =
+        err?.code === 'auth/popup-blocked' ||
+        err?.code === 'auth/popup-closed-by-user' ||
+        err?.code === 'auth/cancelled-popup-request' ||
+        err?.message?.includes('closed') ||
+        err?.message?.includes('닫혔') ||
+        err?.message?.includes('취소');
+
+      if (isPopupIssue) {
+        setErrorMessage(
+          '미리보기 창(iFrame) 브라우저 보안으로 인해 로그인 팝업이 바로 닫힐 수 있습니다. 우측 [새 탭(전체화면)에서 열기]를 누르시면 정상적으로 구글 계정이 연동됩니다.'
+        );
+      } else {
+        setErrorMessage(
+          (err.message || '구글 로그인 중 오류가 발생했습니다.') +
+            ' (우측 [새 탭에서 열기]를 이용해 보세요)'
+        );
+      }
     } finally {
       setIsSigningIn(false);
     }
@@ -124,35 +148,82 @@ export const GoogleSheetsSyncManager: React.FC<GoogleSheetsSyncManagerProps> = (
     });
   };
 
-  // 2. Request to save current portfolio (triggers confirmation dialog)
-  const requestSaveArtwork = () => {
+  // Save current portfolio directly
+  const handleSaveArtwork = async () => {
     if (!currentPortfolio) return;
-    if (!token) {
-      handleSignIn();
-      return;
+    setErrorMessage(null);
+    setSaveSuccessMsg(null);
+
+    let activeToken = token;
+    if (!activeToken) {
+      setIsSaving(true);
+      try {
+        const signRes = await googleSignIn();
+        activeToken = signRes.accessToken;
+        setUser(signRes.user);
+        setToken(activeToken);
+      } catch (err: any) {
+        setIsSaving(false);
+        const isPopupIssue =
+          err?.code === 'auth/popup-blocked' ||
+          err?.code === 'auth/popup-closed-by-user' ||
+          err?.code === 'auth/cancelled-popup-request' ||
+          err?.message?.includes('closed') ||
+          err?.message?.includes('닫혔') ||
+          err?.message?.includes('취소');
+        if (isPopupIssue) {
+          setErrorMessage(
+            '구글 로그인 창이 닫혔습니다. 우측 [새 탭에서 열기]를 눌러 진행하시거나, [CSV 파일 다운로드]로 즉시 엑셀/구글 시트 파일을 받으실 수 있습니다.'
+          );
+        } else {
+          setErrorMessage(
+            (err.message || '구글 인증이 필요합니다.') +
+              ' (우측 [CSV 파일 다운로드]를 이용하시면 즉시 스프레드시트 파일로 보관하실 수 있습니다)'
+          );
+        }
+        return;
+      }
     }
 
-    if (!currentSheet) {
-      setConfirmModal({
-        isOpen: true,
-        type: 'create',
-        title: '새 구글 시트 생성 및 저장 확인',
-        description:
-          '저장할 구글 시트가 없습니다. Google Drive에 새 구글 시트 「미술관 작품관리대장」을 새로 생성한 후, 현재 작품(' +
-          currentPortfolio.artworkNumber +
-          ' · ' +
-          currentPortfolio.title +
-          ')을 첫 번째 행으로 저장하시겠습니까?',
-      });
-      return;
-    }
+    setIsSaving(true);
+    try {
+      let sheetToUse = currentSheet;
+      if (!sheetToUse) {
+        sheetToUse = await createPortfolioSpreadsheet(activeToken);
+        setCurrentSheet(sheetToUse);
+        localStorage.setItem('artist_portfolio_sheet', JSON.stringify(sheetToUse));
+      }
 
-    setConfirmModal({
-      isOpen: true,
-      type: 'save',
-      title: '구글 시트 작품 저장 확인',
-      description: `구글 시트 「${currentSheet.title}」에 현재 작품 [${currentPortfolio.artworkNumber}] "${currentPortfolio.title}"을 새로운 행으로 추가(Append)하시겠습니까?`,
-    });
+      await appendArtworkToSpreadsheet(
+        activeToken,
+        sheetToUse.spreadsheetId,
+        currentPortfolio
+      );
+      setSavedArtworkNumbers((prev) => new Set(prev).add(currentPortfolio.artworkNumber));
+      setSaveSuccessMsg(
+        `구글 시트 「${sheetToUse.title}」에 [${currentPortfolio.artworkNumber}] "${currentPortfolio.title}" 저장 완료!`
+      );
+      if (onSaveSuccess) onSaveSuccess(sheetToUse.spreadsheetUrl);
+    } catch (err: any) {
+      console.error('Save to sheet error:', err);
+      if (err?.message?.includes('401') || err?.message?.includes('UNAUTHENTICATED')) {
+        setToken(null);
+        setErrorMessage('구글 인증 토큰이 만료되었습니다. 다시 [구글 시트에 저장]을 눌러주세요.');
+      } else {
+        setErrorMessage(
+          (err.message || '구글 시트 저장 실패') +
+            ' (하단 [CSV 다운로드] 버튼을 누르시면 구글 시트/엑셀에서 바로 열 수 있는 파일로 즉시 저장됩니다)'
+        );
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDownloadCSV = () => {
+    if (!currentPortfolio) return;
+    downloadArtworkAsCSV([currentPortfolio]);
+    setSaveSuccessMsg(`작품 [${currentPortfolio.artworkNumber}] 스프레드시트 CSV 파일 다운로드 완료!`);
   };
 
   // Execute confirmed operation
@@ -225,7 +296,10 @@ export const GoogleSheetsSyncManager: React.FC<GoogleSheetsSyncManagerProps> = (
     currentPortfolio && savedArtworkNumbers.has(currentPortfolio.artworkNumber);
 
   return (
-    <div className="no-print w-full bg-white rounded-lg border border-neutral-200 shadow-xs p-4 sm:p-5 text-neutral-900 transition-all">
+    <div
+      id="google-sheets-sync-section"
+      className="no-print w-full bg-white rounded-lg border border-neutral-200 shadow-xs p-4 sm:p-5 text-neutral-900 transition-all"
+    >
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3.5 border-b border-neutral-100 gap-2">
         <div className="flex items-center space-x-2.5">
@@ -271,32 +345,45 @@ export const GoogleSheetsSyncManager: React.FC<GoogleSheetsSyncManagerProps> = (
             </div>
           ) : (
             /* Official Google Sign-In Button */
-            <button
-              type="button"
-              onClick={handleSignIn}
-              disabled={isSigningIn}
-              className="flex items-center space-x-2 px-3 py-1.5 bg-white hover:bg-neutral-50 border border-neutral-300 text-neutral-700 rounded-md text-xs font-medium shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                <path
-                  fill="#4285F4"
-                  d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-                />
-                <path
-                  fill="#34A853"
-                  d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-                />
-                <path
-                  fill="#FBBC05"
-                  d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.98 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
-                />
-                <path
-                  fill="#EA4335"
-                  d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-                />
-              </svg>
-              <span>{isSigningIn ? '로그인 중...' : 'Google 계정 연결'}</span>
-            </button>
+            <div className="flex items-center space-x-1.5">
+              {isInIframe && (
+                <button
+                  type="button"
+                  onClick={() => window.open(window.location.href, '_blank')}
+                  className="hidden sm:flex items-center space-x-1 px-2 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded-md text-xs font-medium border border-neutral-300 transition-colors cursor-pointer"
+                  title="미리보기 창 보안 제한 없이 새 탭에서 구글 계정 연동"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-neutral-500" />
+                  <span>새 탭에서 열기</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleSignIn}
+                disabled={isSigningIn}
+                className="flex items-center space-x-2 px-3 py-1.5 bg-white hover:bg-neutral-50 border border-neutral-300 text-neutral-700 rounded-md text-xs font-medium shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.98 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                  />
+                </svg>
+                <span>{isSigningIn ? '로그인 중...' : 'Google 계정 연결'}</span>
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -386,21 +473,21 @@ export const GoogleSheetsSyncManager: React.FC<GoogleSheetsSyncManagerProps> = (
               </p>
             </div>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={requestSaveArtwork}
+                onClick={handleSaveArtwork}
                 disabled={isSaving || Boolean(isAlreadySaved)}
                 className={`px-4 py-2 rounded-md text-xs font-semibold flex items-center space-x-1.5 transition-all shadow-xs cursor-pointer ${
                   isAlreadySaved
                     ? 'bg-neutral-200 text-neutral-600 cursor-not-allowed'
-                    : 'bg-neutral-900 hover:bg-neutral-800 active:bg-neutral-950 text-white'
+                    : 'bg-emerald-800 hover:bg-emerald-900 active:bg-emerald-950 text-white'
                 }`}
               >
                 {isSaving ? (
                   <>
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>저장 중...</span>
+                    <span>구글 시트 저장 중...</span>
                   </>
                 ) : isAlreadySaved ? (
                   <>
@@ -416,22 +503,74 @@ export const GoogleSheetsSyncManager: React.FC<GoogleSheetsSyncManagerProps> = (
                   </>
                 )}
               </button>
+
+              <button
+                type="button"
+                onClick={handleDownloadCSV}
+                className="px-3.5 py-2 rounded-md text-xs font-medium flex items-center space-x-1.5 transition-all bg-white hover:bg-neutral-100 border border-neutral-300 text-neutral-800 shadow-2xs cursor-pointer"
+                title="Google Sheets / Excel과 100% 호환되는 UTF-8 CSV 즉시 저장"
+              >
+                <Download className="w-3.5 h-3.5 text-neutral-600" />
+                <span>CSV 즉시 다운로드</span>
+              </button>
             </div>
           </div>
         )}
 
         {/* Feedback Messages */}
         {saveSuccessMsg && (
-          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-md flex items-center space-x-2 text-xs text-emerald-900">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span className="font-medium">{saveSuccessMsg}</span>
+          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-md flex items-center justify-between text-xs text-emerald-900">
+            <div className="flex items-center space-x-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="font-medium">{saveSuccessMsg}</span>
+            </div>
+            {currentSheet && (
+              <a
+                href={currentSheet.spreadsheetUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-bold underline ml-2 shrink-0 flex items-center space-x-1 text-emerald-800"
+              >
+                <span>시트 바로 확인</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
           </div>
         )}
 
         {errorMessage && (
-          <div className="p-3 bg-red-50 border border-red-200 rounded-md flex items-center space-x-2 text-xs text-red-900">
-            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
-            <span>{errorMessage}</span>
+          <div className="p-3.5 bg-red-50 border border-red-200 rounded-md flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-red-900">
+            <div className="flex items-center space-x-2">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+            <div className="flex items-center space-x-2 shrink-0 self-end sm:self-auto">
+              <button
+                type="button"
+                onClick={handleDownloadCSV}
+                className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded font-medium text-xs flex items-center space-x-1 shadow-2xs cursor-pointer"
+                title="오류 발생 시 CSV로 즉시 다운로드"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>CSV로 즉시 받기</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => window.open(window.location.href, '_blank')}
+                className="px-2.5 py-1 bg-white hover:bg-neutral-50 border border-red-300 text-red-800 rounded font-semibold text-xs flex items-center space-x-1.5 shadow-2xs cursor-pointer"
+                title="브라우저 팝업 제한 없는 새 탭에서 열기"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>새 탭에서 열기</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setErrorMessage(null)}
+                className="text-red-400 hover:text-red-700 px-1.5 py-1 text-xs cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
           </div>
         )}
       </div>

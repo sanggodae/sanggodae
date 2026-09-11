@@ -31,6 +31,9 @@ import {
   Sliders,
   Maximize2,
   ZoomIn,
+  FileSpreadsheet,
+  Check,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface A4PortfolioProps {
@@ -65,8 +68,8 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
   const [imageNaturalHeight, setImageNaturalHeight] = useState<number>(0);
 
   const [title, setTitle] = useState<string>('');
-  const [canvasSize, setCanvasSize] = useState<string>('');
-  const [materialCode, setMaterialCode] = useState<MaterialCode | ''>('');
+  const [canvasSize, setCanvasSize] = useState<string>('030P');
+  const [materialCode, setMaterialCode] = useState<MaterialCode | ''>('A');
   const [year, setYear] = useState<number | ''>(new Date().getFullYear());
 
   // Image display ratio & fit: '16:9' (default horizontal 16:9 widescreen) | 'original'
@@ -213,33 +216,28 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
   // Validation and portfolio generation
   const handleGeneratePortfolio = () => {
     if (!imageUrl) {
-      setErrorMessage('작품 이미지를 업로드해 주세요.');
+      setErrorMessage('작품 이미지를 먼저 선택해 주세요. (아래 [샘플로 테스트] 버튼으로 바로 테스트하실 수도 있습니다)');
+      fileInputRef.current?.click();
       return;
     }
-    if (!title.trim()) {
-      setErrorMessage('Title을 입력해 주세요.');
-      return;
-    }
-    if (!canvasSize.trim()) {
-      setErrorMessage('Canvas Size를 선택해 주세요.');
-      return;
-    }
-    if (!materialCode) {
-      setErrorMessage('Material을 선택해 주세요.');
-      return;
-    }
-    if (!year) {
-      setErrorMessage('제작년도를 선택해 주세요.');
-      return;
-    }
+
+    const finalTitle = title.trim() || 'Untitled';
+    const finalCanvasSize = canvasSize.trim() || '030P';
+    const finalMaterialCode = (materialCode || 'A') as MaterialCode;
+    const finalYear = Number(year) || new Date().getFullYear();
+
+    if (!title.trim()) setTitle(finalTitle);
+    if (!canvasSize.trim()) setCanvasSize(finalCanvasSize);
+    if (!materialCode) setMaterialCode(finalMaterialCode);
+    if (!year) setYear(finalYear);
 
     setErrorMessage(null);
 
     // Commit sequential artwork number
     const finalNumber = generateAndCommitArtworkNumber(
-      Number(year),
-      canvasSize,
-      materialCode as MaterialCode
+      finalYear,
+      finalCanvasSize,
+      finalMaterialCode
     );
 
     setGeneratedArtworkNumber(finalNumber);
@@ -247,8 +245,8 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
     setTimeout(updateArtworkWidth, 80);
   };
 
-  // Quick Demo Artwork Loader (Exact 16:9 Widescreen)
-  const loadDemoArtwork = () => {
+  // Quick Demo Artwork Loader (Exact 16:9 Widescreen) with instant generation option
+  const loadDemoArtwork = (autoGenerate: boolean = true) => {
     const canvas = document.createElement('canvas');
     canvas.width = 1600;
     canvas.height = 900; // Perfect 16:9 Aspect Ratio
@@ -285,11 +283,25 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
     setImageNaturalHeight(900);
     setImageAspectMode('16:9');
     setImageFitMode('cover');
-    setTitle('Untitled (Eclipse #07)');
-    setCanvasSize('030P');
-    setMaterialCode('A');
-    setYear(2026);
+    const demoTitle = 'Untitled (Eclipse #07)';
+    const demoSize = '030P';
+    const demoMat: MaterialCode = 'A';
+    const demoYear = 2026;
+    setTitle(demoTitle);
+    setCanvasSize(demoSize);
+    setMaterialCode(demoMat);
+    setYear(demoYear);
     setErrorMessage(null);
+
+    if (autoGenerate) {
+      const finalNumber = generateAndCommitArtworkNumber(
+        demoYear,
+        demoSize,
+        demoMat
+      );
+      setGeneratedArtworkNumber(finalNumber);
+      setIsGenerated(true);
+    }
     setTimeout(updateArtworkWidth, 50);
   };
 
@@ -359,6 +371,7 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
           materialLabel: selectedMaterialItem ? selectedMaterialItem.label : 'Acrylic on Canvas',
           year: Number(year),
           imageUrl,
+          imageName,
           imageNaturalWidth,
           imageNaturalHeight,
           createdAt: Date.now(),
@@ -509,15 +522,29 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
           {/* Action Buttons */}
           <div className="flex items-center space-x-2">
             {!isGenerated ? (
-              <button
-                type="button"
-                id="btn-sample-fill"
-                onClick={loadDemoArtwork}
-                className="px-3 py-1.5 text-xs font-medium text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded border border-neutral-200 transition-colors flex items-center space-x-1.5 cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-neutral-500" />
-                <span>샘플 불러오기</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  id="btn-sample-fill"
+                  onClick={() => loadDemoArtwork(true)}
+                  className="px-3 py-1.5 text-xs font-medium text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded border border-neutral-200 transition-colors flex items-center space-x-1.5 cursor-pointer"
+                  title="샘플 작품을 넣고 즉시 포트폴리오를 완성합니다"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                  <span>샘플로 테스트</span>
+                </button>
+
+                <button
+                  type="button"
+                  id="btn-generate-portfolio-top"
+                  onClick={handleGeneratePortfolio}
+                  className="px-3.5 py-1.5 text-xs font-bold text-white bg-neutral-900 hover:bg-neutral-800 active:bg-neutral-950 rounded shadow-xs transition-all flex items-center space-x-1.5 cursor-pointer"
+                  title="A4 포트폴리오 확정 생성 및 작품번호 발급"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>포트폴리오 생성하기</span>
+                </button>
+              </>
             ) : (
               <>
                 <button
@@ -543,6 +570,20 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   <span>새 작품</span>
+                </button>
+
+                <button
+                  type="button"
+                  id="btn-scroll-to-sheets"
+                  onClick={() => {
+                    const el = document.getElementById('google-sheets-sync-section');
+                    el?.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded transition-colors flex items-center space-x-1.5 cursor-pointer shadow-2xs"
+                  title="구글 시트에 작품 저장 관리 섹션으로 이동"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>구글 시트 저장</span>
                 </button>
 
                 <button
@@ -578,13 +619,22 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
             <span>{errorMessage}</span>
           </div>
-          <button
-            type="button"
-            onClick={() => setErrorMessage(null)}
-            className="text-red-500 hover:text-red-800 cursor-pointer"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
+          <div className="flex items-center space-x-2.5">
+            <button
+              type="button"
+              onClick={() => loadDemoArtwork(true)}
+              className="text-xs font-semibold text-red-700 hover:text-red-950 underline cursor-pointer"
+            >
+              샘플로 바로 테스트
+            </button>
+            <button
+              type="button"
+              onClick={() => setErrorMessage(null)}
+              className="text-red-500 hover:text-red-800 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -1026,25 +1076,50 @@ export const A4Portfolio: React.FC<A4PortfolioProps> = ({
               </div>
             </div>
 
-            {/* Core Single Action Button: 포트폴리오 생성 (Bottom of A4) */}
-            {!isGenerated && (
-              <div className="no-print w-full flex flex-col items-center pt-3 sm:pt-5">
-                <button
-                  type="button"
-                  id="btn-create-portfolio"
-                  onClick={handleGeneratePortfolio}
-                  className="w-full max-w-sm py-2.5 sm:py-3 px-6 bg-neutral-900 text-white text-xs sm:text-sm font-semibold rounded-md hover:bg-neutral-800 active:bg-neutral-950 transition-colors shadow-md flex items-center justify-center space-x-2 cursor-pointer group"
-                >
-                  <span>포트폴리오 생성</span>
-                </button>
-                <span className="text-[10px] sm:text-[11px] text-neutral-400 mt-1">
-                  * 위 A4 화면에서 정보 입력 및 이미지 업로드 후 버튼을 누르면 완성됩니다.
-                </span>
-              </div>
-            )}
           </div>
         </div>
       </div>
+
+      {/* Portfolio Generation Action Bar (Shown before generation, outside A4 so never cut off) */}
+      {!isGenerated && (
+        <div className="no-print w-full max-w-[1020px] mt-4 p-4 sm:p-5 bg-white rounded-lg border border-neutral-300 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center space-x-3 text-left w-full sm:w-auto">
+            <div className="w-10 h-10 rounded-full bg-neutral-900 text-white flex items-center justify-center shrink-0">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold text-neutral-900">
+                A4 포트폴리오 생성 준비
+              </h4>
+              <p className="text-xs text-neutral-500">
+                {imageUrl
+                  ? '작품 이미지가 준비되었습니다. [포트폴리오 생성하기]를 누르면 일련번호가 자동 발급됩니다.'
+                  : '작품 이미지를 올린 후 [포트폴리오 생성하기]를 누르거나, [샘플로 테스트] 버튼으로 바로 확인해보세요.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
+            <button
+              type="button"
+              id="btn-sample-fill-bottom"
+              onClick={() => loadDemoArtwork(true)}
+              className="px-3.5 py-2 text-xs font-medium text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded-md border border-neutral-300 transition-colors cursor-pointer"
+            >
+              샘플로 테스트
+            </button>
+            <button
+              type="button"
+              id="btn-create-portfolio"
+              onClick={handleGeneratePortfolio}
+              className="px-6 py-2 text-xs sm:text-sm font-bold text-white bg-neutral-900 hover:bg-neutral-800 active:bg-neutral-950 rounded-md shadow-md transition-all flex items-center space-x-2 cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>포트폴리오 생성하기</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Google Sheets Continuous Save & Sync Manager (Hidden when printing) */}
       <div className="no-print w-full max-w-[1040px] mt-4 sm:mt-6">

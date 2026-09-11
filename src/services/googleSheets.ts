@@ -4,7 +4,6 @@ import {
   signInWithPopup,
   GoogleAuthProvider,
   onAuthStateChanged,
-  User,
   signOut,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -16,6 +15,12 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
 ];
 
+export interface GoogleAccountUser {
+  email: string;
+  displayName: string;
+  photoURL?: string;
+}
+
 // Initialize Firebase App
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 export const auth = getAuth(app);
@@ -26,38 +31,135 @@ SCOPES.forEach((scope) => provider.addScope(scope));
 let isSigningIn = false;
 // In-memory token cache (Do NOT put access tokens in localStorage/sessionStorage)
 let cachedAccessToken: string | null = null;
+let cachedGoogleUser: GoogleAccountUser | null = null;
 
 export const initAuth = (
-  onAuthSuccess?: (user: User, token: string) => void,
+  onAuthSuccess?: (user: GoogleAccountUser, token: string) => void,
   onAuthFailure?: () => void
 ) => {
-  return onAuthStateChanged(auth, async (user: User | null) => {
-    if (user) {
+  return onAuthStateChanged(auth, async (fbUser) => {
+    if (fbUser) {
+      const user: GoogleAccountUser = {
+        email: fbUser.email || '',
+        displayName: fbUser.displayName || fbUser.email || 'User',
+        photoURL: fbUser.photoURL || undefined,
+      };
+      cachedGoogleUser = user;
       if (cachedAccessToken) {
         if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
       } else if (!isSigningIn) {
-        // If user is logged in but in-memory token expired/missing,
-        // we can prompt for sign-in again when an operation is performed.
         if (onAuthFailure) onAuthFailure();
       }
+    } else if (cachedGoogleUser && cachedAccessToken) {
+      if (onAuthSuccess) onAuthSuccess(cachedGoogleUser, cachedAccessToken);
     } else {
       cachedAccessToken = null;
+      cachedGoogleUser = null;
       if (onAuthFailure) onAuthFailure();
     }
   });
 };
 
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string }> => {
+/**
+ * Robust Google Sign-In:
+ * Prioritizes Google Identity Services (GSI - google.accounts.oauth2) to bypass
+ * Firebase __/auth/handler third-party cookie issues and iframe popup flashing.
+ * Falls back gracefully to Firebase Auth signInWithPopup if GSI is not loaded.
+ */
+export const googleSignIn = async (): Promise<{ user: GoogleAccountUser; accessToken: string }> => {
+  if (cachedAccessToken && cachedGoogleUser) {
+    return { user: cachedGoogleUser, accessToken: cachedAccessToken };
+  }
+
+  isSigningIn = true;
+
   try {
-    isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
+    // 1. Try Google Identity Services (GSI) Token Client first
+    if (typeof window !== 'undefined' && (window as any).google?.accounts?.oauth2) {
+      try {
+        const result = await new Promise<{ user: GoogleAccountUser; accessToken: string }>(
+          (resolve, reject) => {
+            const tokenClient = (window as any).google.accounts.oauth2.initTokenClient({
+              client_id: firebaseConfig.oAuthClientId,
+              scope: SCOPES.join(' '),
+              prompt: 'select_account',
+              callback: async (response: any) => {
+                if (response.error) {
+                  console.error('GSI OAuth error:', response);
+                  reject(new Error(response.error_description || response.error || 'Google 인증에 실패했습니다.'));
+                  return;
+                }
+
+                const accessToken = response.access_token;
+                if (!accessToken) {
+                  reject(new Error('Google Access Token을 받지 못했습니다.'));
+                  return;
+                }
+
+                try {
+                  const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                  });
+                  const profile = await userRes.json();
+                  const gUser: GoogleAccountUser = {
+                    email: profile.email || 'Google User',
+                    displayName: profile.name || profile.email?.split('@')[0] || '사용자',
+                    photoURL: profile.picture,
+                  };
+
+                  cachedAccessToken = accessToken;
+                  cachedGoogleUser = gUser;
+                  resolve({ user: gUser, accessToken });
+                } catch {
+                  const fallbackUser: GoogleAccountUser = {
+                    email: 'Google Account',
+                    displayName: 'Google User',
+                  };
+                  cachedAccessToken = accessToken;
+                  cachedGoogleUser = fallbackUser;
+                  resolve({ user: fallbackUser, accessToken });
+                }
+              },
+              error_callback: (err: any) => {
+                console.error('GSI Error Callback:', err);
+                reject(
+                  new Error(
+                    'Google 로그인 창이 닫혔거나 취소되었습니다. 브라우저 팝업 허용 여부를 확인해 주세요.'
+                  )
+                );
+              },
+            });
+
+            tokenClient.requestAccessToken({ prompt: 'select_account' });
+          }
+        );
+
+        return result;
+      } catch (gsiError: any) {
+        console.warn('GSI failed or closed, checking Firebase fallback:', gsiError);
+        // If user actively closed it, propagate message
+        if (gsiError.message && gsiError.message.includes('취소')) {
+          throw gsiError;
+        }
+      }
+    }
+
+    // 2. Fallback: Firebase Auth signInWithPopup
+    const fbResult = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(fbResult);
     if (!credential?.accessToken) {
-      throw new Error('구글 인증 토큰 획득에 실패했습니다.');
+      throw new Error('Google OAuth 인증 토큰 획득에 실패했습니다.');
     }
 
     cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken };
+    const gUser: GoogleAccountUser = {
+      email: fbResult.user.email || '',
+      displayName: fbResult.user.displayName || fbResult.user.email || 'Google User',
+      photoURL: fbResult.user.photoURL || undefined,
+    };
+    cachedGoogleUser = gUser;
+
+    return { user: gUser, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error('Google Sign In Error:', error);
     throw error;
@@ -71,8 +173,13 @@ export const getAccessToken = async (): Promise<string | null> => {
 };
 
 export const logout = async () => {
-  await signOut(auth);
+  try {
+    await signOut(auth);
+  } catch (e) {
+    console.error('Firebase signout error', e);
+  }
   cachedAccessToken = null;
+  cachedGoogleUser = null;
 };
 
 export interface SpreadsheetInfo {
@@ -100,6 +207,7 @@ export const createPortfolioSpreadsheet = async (
     sheets: [
       {
         properties: {
+          sheetId: 0,
           title: '작품관리대장',
           gridProperties: {
             frozenRowCount: 1,
@@ -156,153 +264,64 @@ const initializeSpreadsheetHeaders = async (accessToken: string, spreadsheetId: 
     ],
   ];
 
-  // 1. Insert header text
-  const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
-    range
-  )}?valueInputOption=USER_ENTERED`;
+  try {
+    // 1. Insert header text
+    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
+      range
+    )}?valueInputOption=USER_ENTERED`;
 
-  await fetch(appendUrl, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ values: headers }),
-  });
+    await fetch(appendUrl, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ values: headers }),
+    });
 
-  // 2. Format header row & column widths via batchUpdate
-  const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`;
-  const formatBody = {
-    requests: [
-      // Header formatting (dark background, bold white text)
-      {
-        repeatCell: {
-          range: {
-            sheetId: 0,
-            startRowIndex: 0,
-            endRowIndex: 1,
-            startColumnIndex: 0,
-            endColumnIndex: 7,
-          },
-          cell: {
-            userEnteredFormat: {
-              backgroundColor: { red: 0.12, green: 0.16, blue: 0.22 }, // Dark slate
-              textFormat: {
-                foregroundColor: { red: 1.0, green: 1.0, blue: 1.0 },
-                bold: true,
-                fontSize: 10,
-              },
-              horizontalAlignment: 'CENTER',
-              verticalAlignment: 'MIDDLE',
+    // 2. Format header row & column widths via batchUpdate
+    const formatBody = {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId: 0,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 7,
             },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.12, green: 0.16, blue: 0.22 },
+                textFormat: {
+                  foregroundColor: { red: 1.0, green: 1.0, blue: 1.0 },
+                  bold: true,
+                  fontSize: 10,
+                },
+                horizontalAlignment: 'CENTER',
+                verticalAlignment: 'MIDDLE',
+              },
+            },
+            fields:
+              'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
           },
-          fields:
-            'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
         },
-      },
-      // Set Column Widths (pixels)
-      // A (Images): 150px
-      {
-        updateDimensionProperties: {
-          range: {
-            sheetId: 0,
-            dimension: 'COLUMNS',
-            startIndex: 0,
-            endIndex: 1,
-          },
-          properties: { pixelSize: 150 },
-          fields: 'pixelSize',
-        },
-      },
-      // B (작품번호): 130px
-      {
-        updateDimensionProperties: {
-          range: {
-            sheetId: 0,
-            dimension: 'COLUMNS',
-            startIndex: 1,
-            endIndex: 2,
-          },
-          properties: { pixelSize: 130 },
-          fields: 'pixelSize',
-        },
-      },
-      // C (Title): 220px
-      {
-        updateDimensionProperties: {
-          range: {
-            sheetId: 0,
-            dimension: 'COLUMNS',
-            startIndex: 2,
-            endIndex: 3,
-          },
-          properties: { pixelSize: 220 },
-          fields: 'pixelSize',
-        },
-      },
-      // D (Canvas Size): 110px
-      {
-        updateDimensionProperties: {
-          range: {
-            sheetId: 0,
-            dimension: 'COLUMNS',
-            startIndex: 3,
-            endIndex: 4,
-          },
-          properties: { pixelSize: 110 },
-          fields: 'pixelSize',
-        },
-      },
-      // E (Material): 190px
-      {
-        updateDimensionProperties: {
-          range: {
-            sheetId: 0,
-            dimension: 'COLUMNS',
-            startIndex: 4,
-            endIndex: 5,
-          },
-          properties: { pixelSize: 190 },
-          fields: 'pixelSize',
-        },
-      },
-      // F (제작년도): 100px
-      {
-        updateDimensionProperties: {
-          range: {
-            sheetId: 0,
-            dimension: 'COLUMNS',
-            startIndex: 5,
-            endIndex: 6,
-          },
-          properties: { pixelSize: 100 },
-          fields: 'pixelSize',
-        },
-      },
-      // G (생성일시): 180px
-      {
-        updateDimensionProperties: {
-          range: {
-            sheetId: 0,
-            dimension: 'COLUMNS',
-            startIndex: 6,
-            endIndex: 7,
-          },
-          properties: { pixelSize: 180 },
-          fields: 'pixelSize',
-        },
-      },
-    ],
-  };
+      ],
+    };
 
-  await fetch(batchUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(formatBody),
-  });
+    const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`;
+    await fetch(batchUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(formatBody),
+    });
+  } catch (err) {
+    console.warn('Could not apply custom header styling to new spreadsheet:', err);
+  }
 };
 
 /**
@@ -318,10 +337,15 @@ export const appendArtworkToSpreadsheet = async (
     range
   )}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
 
-  // Format image formula or URL
-  const imageCell = artwork.imageUrl?.startsWith('http')
-    ? `=IMAGE("${artwork.imageUrl}")`
-    : artwork.imageUrl || '';
+  // Format image formula or URL (Never put large base64 data URIs into Google Sheets cells - 50,000 char limit)
+  let imageCell = '';
+  if (artwork.imageUrl?.startsWith('http://') || artwork.imageUrl?.startsWith('https://')) {
+    imageCell = `=IMAGE("${artwork.imageUrl}")`;
+  } else if (artwork.imageName) {
+    imageCell = `[첨부 파일: ${artwork.imageName}]`;
+  } else {
+    imageCell = '[업로드 이미지]';
+  }
 
   const dateString = new Date(artwork.createdAt || Date.now()).toLocaleString('ko-KR', {
     year: 'numeric',
@@ -363,3 +387,36 @@ export const appendArtworkToSpreadsheet = async (
     updatedRange: data.updates?.updatedRange || '',
   };
 };
+
+/**
+ * Downloads artworks as a UTF-8 BOM CSV file that can be opened directly
+ * in Google Sheets (File > Import) or Excel with Korean support.
+ */
+export const downloadArtworkAsCSV = (artworks: GeneratedPortfolioData[]) => {
+  if (!artworks || artworks.length === 0) return;
+  const headers = ['작품번호', 'Title', 'Canvas Size', 'Material', '제작년도', '첨부파일명', '생성일시'];
+  const rows = artworks.map((art) => [
+    `"${(art.artworkNumber || '').replace(/"/g, '""')}"`,
+    `"${(art.title || '').replace(/"/g, '""')}"`,
+    `"${(art.canvasSize || '').replace(/"/g, '""')}"`,
+    `"${(art.materialLabel || '').replace(/"/g, '""')}"`,
+    `"${art.year || ''}"`,
+    `"${(art.imageName || '로컬 이미지').replace(/"/g, '""')}"`,
+    `"${new Date(art.createdAt || Date.now()).toLocaleString('ko-KR')}"`,
+  ]);
+
+  const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const fileName = artworks.length === 1
+    ? `작품관리대장_${artworks[0].artworkNumber}.csv`
+    : `작품관리대장_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+

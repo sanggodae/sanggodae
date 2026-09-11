@@ -38,6 +38,7 @@ export interface GeneratedPortfolioData {
   materialLabel: string;
   year: number;
   imageUrl: string;
+  imageName?: string;
   imageNaturalWidth: number;
   imageNaturalHeight: number;
   createdAt: number;
